@@ -50,9 +50,15 @@ jobs:
         TNAME: K2P
       run: |
         cd /opt/rt-n56u/trunk
+        
+        # 1. 配置基础设置
+        if [ ! -f configs/templates/$TNAME.config ] ; then
+            echo "Error: Config not found!"
+            exit 1
+        fi
         cp -f configs/templates/$TNAME.config .config
         
-        # Disable all plugins safely using delete command
+        # 2. 纯净版配置 (删除不需要的功能)
         sed -i '/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/d' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/d' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/d' .config
@@ -61,36 +67,44 @@ jobs:
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ZEROTIER/d' .config
         
-        # Explicitly set N for VPN tools
+        # 显式关闭插件
         echo "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_FRPC=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_ALIDDNS=n" >> .config
         
-        # Fix line endings
+        # 修复格式
         sed -i 's/\r//' .config
         
-        # Remove problematic directories from user/Makefile using delete
+        # 3. 屏蔽烂插件源码 (防止 Makefile 报错)
         sed -i '/^dir_y += shadowsocks/d' user/Makefile
         sed -i '/^dir_y += v2ray/d' user/Makefile
         sed -i '/^dir_y += trojan/d' user/Makefile
         
-        # Remove sudo from scripts
-        sed -i 's/sudo //g' ../build_firmware_modify
-        sed -i 's/sudo //g' ../tools/Makefile
-        sed -i 's/sudo //g' ../Makefile
+        # 4. === 核心修复点：文件路径 ===
+        # 之前写成了 ../build_firmware_modify (上一级)，报错说找不到
+        # 现在改为 ./build_firmware_modify (当前目录)
         
-        # Clear tree and build
-        ../clear_tree
-        yes "" | ../build_firmware_modify K2P 0
+        # 去除 sudo
+        sed -i 's/sudo //g' ./build_firmware_modify
+        sed -i 's/sudo //g' ./tools/Makefile
+        sed -i 's/sudo //g' ./Makefile
         
-        # Move firmware
+        # 赋予执行权限 (双保险)
+        chmod +x ./build_firmware_modify
+        chmod +x ./clear_tree
+        
+        # 5. 开始编译
+        ./clear_tree
+        yes "" | ./build_firmware_modify K2P 0
+        
+        # 移动固件
         mv -f images/*.trx /opt/images/
 
     - name: Upload Firmware
       uses: actions/upload-artifact@master
       if: always()
       with:
-        name: Padavan-K2P-KVR-Final
+        name: Padavan-K2P-KVR-Success
         path: /opt/images
