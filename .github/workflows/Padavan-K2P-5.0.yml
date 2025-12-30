@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    # 宿主机使用 Ubuntu 22.04，确保 GitHub 插件(Upload)能正常运行
+    # 宿主机依然用最新的，保证 GitHub 插件正常
     runs-on: ubuntu-22.04
 
     steps:
@@ -16,10 +16,13 @@ jobs:
     - name: Hijack Toolchain (Host)
       run: |
         cd /opt/rt-n56u/toolchain-mipsel
-        # 下载适配的工具链
+        # 下载 hanwckf 的工具链 (这个工具链是静态编译的，兼容性很好)
         wget -q https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1/mipsel-linux-uclibc.tar.xz
         tar -xvf mipsel-linux-uclibc.tar.xz
         rm -f mipsel-linux-uclibc.tar.xz
+        
+        # 确保工具链有执行权限
+        chmod -R 755 toolchain-3.4.x
 
     - name: Prepare Config (Host)
       env:
@@ -28,7 +31,7 @@ jobs:
         cd /opt/rt-n56u/trunk
         cp -f configs/templates/$TNAME.config .config
         
-        # === 插件清理 ===
+        # === 插件大清理 (为了保证能出固件，先极简模式) ===
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n/g' .config
@@ -48,44 +51,55 @@ jobs:
         # 修复换行符
         sed -i 's/\r//' .config
 
-    - name: Compile in Docker (Guest)
+    - name: Compile in Legacy Docker (Ubuntu 16.04)
       uses: addnab/docker-run-action@v3
       with:
-        # 使用 18.04 镜像
-        image: ubuntu:18.04
-        # 挂载宿主机目录到容器
+        # 使用 16.04，这是老代码的“原配”环境 (OpenSSL 1.0)
+        image: ubuntu:16.04
         options: -v /opt/rt-n56u:/opt/rt-n56u -w /opt/rt-n56u/trunk
         run: |
-          # === 容器内执行 ===
+          # === 容器内部 ===
           
-          # 1. 修复源 (USTC)
-          sed -i 's/archive.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
-          sed -i 's/security.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
+          # 1. 修复 16.04 的存档源 (官方源已关闭)
+          echo "Switching to old-releases..."
+          sed -i 's/archive.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
+          sed -i 's/security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
           
-          # 2. 更新列表
+          # 2. 安装依赖 (16.04 的包名)
           apt-get update
+          # 注意：16.04 里的 libssl-dev 默认就是 1.0 版本，完美适配
+          apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
+          cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
+          pkg-config zlib1g-dev libgmp-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev \
+          libssl-dev libelf-dev kmod vim-common
           
-          # 3. 安装依赖 (关键修改：将 libgmp3-dev 改为 libgmp-dev，并合并为整行防止解析错误)
-          apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot cpio python-docutils gettext automake autopoint texinfo build-essential help2man pkg-config zlib1g-dev libgmp-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev libssl-dev libelf-dev kmod vim-common
-          
-          # 4. 修复时间戳
+          # 3. 修复时间戳
           find . -name "configure.ac" -exec touch {} +
           find . -name "Makefile.am" -exec touch {} +
           
-          # 5. 修复 SSL 路径
-          mkdir -p /usr/include/openssl
-          ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/opensslconf.h || true
-
-          # 6. 开始编译
+          # 4. 再次修复工具链路径 (防止 Docker 挂载权限问题)
+          chmod +x ../toolchain-mipsel/toolchain-3.4.x/bin/*
+          
+          # 5. 开始编译 (增加详细输出)
           echo "Starting compilation..."
           ./clear_tree
+          
+          # 运行编译
           ./build_firmware_modify K2P 0
           
-          echo "Compilation finished."
+          # 6. 结果自检 (如果没文件，强制报错，让你看到红叉)
+          if ls images/*.trx 1> /dev/null 2>&1; then
+             echo "✅ Firmware generated successfully!"
+             ls -lh images/*.trx
+          else
+             echo "❌ Build FAILED! No firmware found."
+             echo "=== LAST 20 LINES OF LOGS should be above ==="
+             exit 1
+          fi
 
     - name: Upload packages (Host)
       uses: actions/upload-artifact@master
-      if: always()
+      if: success()
       with:
-        name: Padavan-K2P-KVR-Fixed
+        name: Padavan-K2P-KVR-1604
         path: /opt/rt-n56u/trunk/images
