@@ -1,90 +1,110 @@
-name: Padavan-K2P-KVR-GodMode
+name: Padavan-K2P-KVR
 
 on: 
   workflow_dispatch:
 
 jobs:
   build:
+    # 宿主机：Ubuntu 22.04 (保障 GitHub 插件正常)
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Clone Source Code
+    - name: Clone Source (宿主机)
       run: |
         git clone --depth=1 https://github.com/fightroad/Padavan-KVR.git /opt/rt-n56u
 
-    - name: Hijack Toolchain (手动下载工具链，双保险)
+    - name: Hijack Toolchain (宿主机)
       run: |
         cd /opt/rt-n56u/toolchain-mipsel
+        # 再次确认下载链接有效性，并处理解压
         wget -q https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1/mipsel-linux-uclibc.tar.xz
         tar -xvf mipsel-linux-uclibc.tar.xz
         rm -f mipsel-linux-uclibc.tar.xz
-        # 建立软链接，防止脚本找不到
+        # 双重保险：建立软链接，无论脚本找哪个名字都能找到
         ln -sf toolchain-3.4.x toolchain
         chmod -R 755 toolchain-3.4.x
 
-    - name: Prepare Config
+    - name: Modify Makefiles (核心手术：修改名单)
+      run: |
+        cd /opt/rt-n56u/trunk/user
+        
+        # === 重点在这里 ===
+        # 不要删文件夹，而是把 Makefile 里的相关行注释掉
+        # 这样编译器就不会去编译这些破烂插件了
+        sed -i 's/^dir_y += shadowsocks/# dir_y += shadowsocks/g' Makefile
+        sed -i 's/^dir_y += v2ray/# dir_y += v2ray/g' Makefile
+        sed -i 's/^dir_y += trojan/# dir_y += trojan/g' Makefile
+        sed -i 's/^dir_y += mentohust/# dir_y += mentohust/g' Makefile
+        sed -i 's/^dir_y += njit/# dir_y += njit/g' Makefile
+        
+        # 顺便处理一下 sudo，防止报错
+        cd ..
+        sed -i 's/sudo //g' build_firmware_modify
+        sed -i 's/sudo //g' tools/Makefile
+        sed -i 's/sudo //g' Makefile
+
+    - name: Prepare Config (配置纯净版)
       env:
         TNAME: K2P
       run: |
         cd /opt/rt-n56u/trunk
         cp -f configs/templates/$TNAME.config .config
         
-        # === 1. 暴力清理插件 (防止报错) ===
-        # 直接删除可能有问题的源码目录
-        rm -rf user/shadowsocks
-        rm -rf user/v2ray
-        rm -rf user/trojan
-        
-        # === 2. 配置文件清理 ===
+        # 强力关闭所有插件开关
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_V2RAY=y/CONFIG_FIRMWARE_INCLUDE_V2RAY=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_TROJAN=y/CONFIG_FIRMWARE_INCLUDE_TROJAN=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n/g' .config
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=y/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=n/g' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' .config 
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ZEROTIER/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_V2RAY/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_TROJAN/d' .config
-        
-        # 修复 sudo 问题
-        sed -i 's/sudo //g' build_firmware_modify
-        sed -i 's/sudo //g' tools/Makefile
-        sed -i 's/sudo //g' Makefile
         
         # 修复换行符
         sed -i 's/\r//' .config
 
-    - name: Compile in Dedicated Image
+    - name: Compile in Docker (使用 20.04 容器)
       uses: addnab/docker-run-action@v3
       with:
-        # === 核心改变：使用大神制作的专用编译镜像 ===
-        # 这个镜像里环境是 100% 齐全的
-        image: ylqjgm/padavan
+        image: ubuntu:20.04
         options: -v /opt/rt-n56u:/opt/rt-n56u -w /opt/rt-n56u/trunk
         run: |
-          echo "Processing in specialized environment..."
+          # === 容器环境配置 ===
+          sed -i 's/archive.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
+          apt-get update
           
-          # 1. 再次修复 Automake 时间戳 (老代码通病)
+          # 安装全套依赖 (包含 bc, kmod, libssl-dev 等)
+          apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
+          cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
+          pkg-config zlib1g-dev libgmp-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev \
+          libssl-dev libelf-dev kmod vim-common bc python3-docutils
+          
+          # 建立 OpenSSL 兼容软链接 (fightroad 代码老，找不到新路径)
+          mkdir -p /usr/include/openssl
+          ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/opensslconf.h || true
+          
+          # 修复时间戳
           find . -name "configure.ac" -exec touch {} +
           find . -name "Makefile.am" -exec touch {} +
           
-          # 2. 确保工具链路径正确 (再次授权)
+          # 确保工具链可执行
           chmod +x ../toolchain-mipsel/toolchain-3.4.x/bin/*
           
-          # 3. 清理环境
+          # === 编译开始 ===
+          echo "Start building..."
           ./clear_tree
           
-          # 4. 开始编译 (开启单线程 -j1 调试模式，这样报错会显示得更清楚)
-          echo ">>> STARTING BUILD <<<"
+          # 编译命令 (不加 sudo)
           ./build_firmware_modify K2P 0
           
-          # 5. 结果检查
+          # === 结果验证 (红叉检测) ===
           if ls images/*.trx 1> /dev/null 2>&1; then
-             echo "✅ Firmware Success!"
+             echo "✅ Build SUCCESS!"
+             ls -lh images/*.trx
           else
              echo "❌ Build FAILED!"
-             # 如果失败，列出最后生成的文件，看看死在哪里
+             # 如果失败，列出最后生成的文件帮我定位
              ls -R images/ || true
              exit 1
           fi
@@ -93,5 +113,5 @@ jobs:
       uses: actions/upload-artifact@master
       if: success()
       with:
-        name: Padavan-K2P-KVR-GodMode
+        name: Padavan-K2P-KVR-Nuclear
         path: /opt/rt-n56u/trunk/images
