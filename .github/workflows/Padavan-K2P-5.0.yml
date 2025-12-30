@@ -1,120 +1,104 @@
-name: Padavan-K2P-KVR-LastResort
+name: Padavan-K2P-KVR-Real-80211r
 
 on: 
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
 
     steps:
-    - name: Clone Source
+    - name: Init Environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
       run: |
-        git clone --depth=1 https://github.com/fightroad/Padavan-KVR.git /opt/rt-n56u
+        sudo apt-get update
+        sudo apt-get -y install unzip libtool-bin curl cmake gperf gawk flex bison nano xxd fakeroot \
+        cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
+        pkg-config zlib1g-dev libgmp3-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev wget
+        
+    - name: Clone Source (MeIsReallyBa - 继承了KVR补丁的活跃仓库)
+      run: |
+        git clone --depth=1 https://github.com/MeIsReallyBa/padavan-4.4.git /opt/rt-n56u
 
-    - name: Hijack Toolchain (Host Side)
+    - name: Setup Toolchain
       run: |
         cd /opt/rt-n56u/toolchain-mipsel
-        # Download hanwckf toolchain
-        wget -O toolchain.tar.xz https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1/mipsel-linux-uclibc.tar.xz
-        tar -xf toolchain.tar.xz
-        rm -f toolchain.tar.xz
-        
-        # Fix toolchain path
-        EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "mipsel*" | head -n 1)
-        if [ "$EXTRACTED_DIR" != "./toolchain-3.4.x" ]; then
-            mv "$EXTRACTED_DIR" toolchain-3.4.x
-        fi
-        ln -sf toolchain-3.4.x toolchain
-        chmod -R 755 toolchain-3.4.x
+        # 这个仓库的工具链脚本是活的，可以直接用
+        sh dl_toolchain.sh
 
-    - name: Prepare Config
+    - name: Configure Pure Version
       env:
         TNAME: K2P
       run: |
         cd /opt/rt-n56u/trunk
+        
+        # 复制 K2P 模板
+        if [ ! -f configs/templates/$TNAME.config ] ; then
+            echo "Error: Config not found!"
+            exit 1
+        fi
         cp -f configs/templates/$TNAME.config .config
         
-        # Pure version config (Disable unnecessary features)
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n/g' .config
+        # =======================================================
+        # 1. 核心：开启 802.11r (KVR) 支持
+        # =======================================================
+        # 这个仓库默认通常开启，但我们强制确保一下无线驱动选项
+        # 这一步是为了保留 fightroad 的驱动特性
+        
+        # =======================================================
+        # 2. 强力净化：关闭所有多余插件 (n)
+        # =======================================================
+        
+        # 科学上网类 (全关)
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_XRAY=y/CONFIG_FIRMWARE_INCLUDE_XRAY=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_V2RAY=y/CONFIG_FIRMWARE_INCLUDE_V2RAY=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_TROJAN=y/CONFIG_FIRMWARE_INCLUDE_TROJAN=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_SSOBFS=y/CONFIG_FIRMWARE_INCLUDE_SSOBFS=n/g' .config
+        
+        # 广告屏蔽类 (全关)
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_ADBYBY=y/CONFIG_FIRMWARE_INCLUDE_ADBYBY=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_KOOLPROXY=y/CONFIG_FIRMWARE_INCLUDE_KOOLPROXY=n/g' .config
+        
+        # 内网穿透类 (全关)
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_FRPC=y/CONFIG_FIRMWARE_INCLUDE_FRPC=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_FRPS=y/CONFIG_FIRMWARE_INCLUDE_FRPS=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_ZEROTIER=y/CONFIG_FIRMWARE_INCLUDE_ZEROTIER=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_ALIDDNS=y/CONFIG_FIRMWARE_INCLUDE_ALIDDNS=n/g' .config
+        
+        # 下载工具类 (全关)
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' .config
+        
+        # 校园网认证类 (全关)
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=y/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=n/g' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' .config 
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_ZEROTIER/d' .config
         
-        # Explicitly disable all plugins
-        echo "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_FRPC=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_ALIDDNS=n" >> .config
+        # 其他杂项
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_WYY=y/CONFIG_FIRMWARE_INCLUDE_WYY=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_WYY_NODOG=y/CONFIG_FIRMWARE_INCLUDE_WYY_NODOG=n/g' .config
         
-        # Fix line endings
+        # 修复换行符
         sed -i 's/\r//' .config
-        
-        # Comment out broken plugins in user/Makefile to prevent build errors
-        sed -i '/^dir_y += shadowsocks/d' user/Makefile
-        sed -i '/^dir_y += v2ray/d' user/Makefile
-        sed -i '/^dir_y += trojan/d' user/Makefile
-        
-        # Remove sudo from scripts
-        sed -i 's/sudo //g' build_firmware_modify
-        sed -i 's/sudo //g' tools/Makefile
-        sed -i 's/sudo //g' Makefile
-        
-        # Make scripts executable
-        chmod +x build_firmware_modify clear_tree
 
-    - name: Compile in Legacy 16.04 Container
-      uses: addnab/docker-run-action@v3
-      with:
-        # Use Ubuntu 16.04 for Linux 3.4 kernel compatibility
-        image: ubuntu:16.04
-        options: -v /opt/rt-n56u:/opt/rt-n56u -w /opt/rt-n56u/trunk
-        run: |
-          # 1. Fix Ubuntu 16.04 EOL sources
-          sed -i 's/archive.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
-          sed -i 's/security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
-          
-          # 2. Install dependencies (including bc, kmod, libssl-dev)
-          apt-get update
-          apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
-          cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
-          pkg-config zlib1g-dev libgmp-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev \
-          libssl-dev libelf-dev kmod vim-common bc python
-          
-          # 3. Force bash as default shell
-          rm /bin/sh && ln -s /bin/bash /bin/sh
-          
-          # 4. Fix OpenSSL path
-          mkdir -p /usr/include/openssl
-          ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/opensslconf.h || true
-          
-          # 5. Fix timestamps
-          find . -name "configure.ac" -exec touch {} +
-          find . -name "Makefile.am" -exec touch {} +
-          
-          # 6. Start compilation
-          echo ">>> STARTING BUILD IN 16.04 <<<"
-          ./clear_tree
-          
-          # Use yes to prevent interactive prompts
-          yes "" | ./build_firmware_modify K2P 0
-          
-          # 7. Check results
-          if ls images/*.trx 1> /dev/null 2>&1; then
-             echo "✅ Build SUCCESS!"
-             ls -lh images/*.trx
-          else
-             echo "❌ Build FAILED!"
-             exit 1
-          fi
+    - name: Build Firmware
+      run: |
+        cd /opt/rt-n56u/trunk
+        # 清理
+        sudo ./clear_tree
+        
+        # 开始编译
+        sudo ./build_firmware_modify K2P 0
+        
+        # 移动固件
+        sudo mv -f images/*.trx /opt/images/
 
     - name: Upload Firmware
       uses: actions/upload-artifact@master
-      if: success()
+      if: always()
       with:
-        name: Padavan-K2P-KVR-Relic
-        path: /opt/rt-n56u/trunk/images
+        name: Padavan-K2P-KVR-Real
+        path: /opt/images
