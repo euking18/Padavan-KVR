@@ -5,15 +5,15 @@ on:
 
 jobs:
   build:
-    # 1. 宿主机使用最新的 Ubuntu 22.04，确保 GitHub 所有插件(upload/checkout)都能正常运行
+    # 宿主机使用 Ubuntu 22.04，确保 GitHub 插件(Upload)能正常运行
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Clone source code (宿主机执行)
+    - name: Clone source code (Host)
       run: |
         git clone --depth=1 https://github.com/fightroad/Padavan-KVR.git /opt/rt-n56u
         
-    - name: Hijack Toolchain (宿主机执行)
+    - name: Hijack Toolchain (Host)
       run: |
         cd /opt/rt-n56u/toolchain-mipsel
         # 下载适配的工具链
@@ -21,14 +21,14 @@ jobs:
         tar -xvf mipsel-linux-uclibc.tar.xz
         rm -f mipsel-linux-uclibc.tar.xz
 
-    - name: Prepare Config (宿主机执行)
+    - name: Prepare Config (Host)
       env:
         TNAME: K2P
       run: |
         cd /opt/rt-n56u/trunk
         cp -f configs/templates/$TNAME.config .config
         
-        # === 插件清理 (在宿主机处理好配置) ===
+        # === 插件清理 ===
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n/g' .config
@@ -40,7 +40,7 @@ jobs:
         sed -i '/CONFIG_FIRMWARE_INCLUDE_V2RAY/d' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TROJAN/d' .config
         
-        # 修复脚本中的 sudo (防止 Docker 内报错)
+        # 修复脚本中的 sudo
         sed -i 's/sudo //g' build_firmware_modify
         sed -i 's/sudo //g' tools/Makefile
         sed -i 's/sudo //g' Makefile
@@ -48,22 +48,44 @@ jobs:
         # 修复换行符
         sed -i 's/\r//' .config
 
-    - name: Compile in Docker (核心步骤：进入旧环境编译)
+    - name: Compile in Docker (Guest)
       uses: addnab/docker-run-action@v3
       with:
-        # 使用 18.04 镜像，完美兼容 GCC 7 和老代码
+        # 使用 18.04 镜像
         image: ubuntu:18.04
+        # 挂载宿主机目录到容器
         options: -v /opt/rt-n56u:/opt/rt-n56u -w /opt/rt-n56u/trunk
         run: |
-          # --- 以下命令全都在 Docker 容器内部执行 ---
+          # === 容器内执行 ===
           
-          # 1. 修复 18.04 的源 (因为官方已停止支持)
-          echo "Fixing sources..."
+          # 1. 修复源 (USTC)
           sed -i 's/archive.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
           sed -i 's/security.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
           
-          # 2. 安装依赖 (容器是空的，需要重新装)
+          # 2. 更新列表
           apt-get update
-          apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
-          cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
-          pkg-config zlib1g-dev libgmp3-dev libmp
+          
+          # 3. 安装依赖 (关键修改：将 libgmp3-dev 改为 libgmp-dev，并合并为整行防止解析错误)
+          apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot cpio python-docutils gettext automake autopoint texinfo build-essential help2man pkg-config zlib1g-dev libgmp-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev libssl-dev libelf-dev kmod vim-common
+          
+          # 4. 修复时间戳
+          find . -name "configure.ac" -exec touch {} +
+          find . -name "Makefile.am" -exec touch {} +
+          
+          # 5. 修复 SSL 路径
+          mkdir -p /usr/include/openssl
+          ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/opensslconf.h || true
+
+          # 6. 开始编译
+          echo "Starting compilation..."
+          ./clear_tree
+          ./build_firmware_modify K2P 0
+          
+          echo "Compilation finished."
+
+    - name: Upload packages (Host)
+      uses: actions/upload-artifact@master
+      if: always()
+      with:
+        name: Padavan-K2P-KVR-Fixed
+        path: /opt/rt-n56u/trunk/images
