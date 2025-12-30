@@ -1,4 +1,4 @@
-name: Padavan-K2P-KVR
+name: Padavan-K2P-KVR-NoHang
 
 on: 
   workflow_dispatch:
@@ -6,99 +6,83 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    container: 
+      image: ubuntu:20.04
 
     steps:
+    - name: Initialization (防卡死修正版)
+      # 关键修改：在这里强制声明“非交互模式”
+      env:
+        DEBIAN_FRONTEND: noninteractive
+        TZ: Asia/Shanghai
+      run: |
+        # 1. 换源
+        sed -i 's/archive.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
+        
+        # 2. 更新列表
+        apt-get update
+        
+        # 3. === 核心修复：先安安静静地把时区装好，不准弹窗 ===
+        apt-get install -y tzdata
+        ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+        dpkg-reconfigure --frontend noninteractive tzdata
+        
+        # 4. 安装其他依赖 (DEBIAN_FRONTEND=noninteractive 会阻止后续所有弹窗)
+        apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
+        cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
+        pkg-config zlib1g-dev libgmp-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev \
+        libssl-dev libelf-dev kmod vim-common bc python3-docutils
+        
+        # 5. SSL 修复
+        mkdir -p /usr/include/openssl
+        ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/opensslconf.h || true
+
     - name: Clone Source
       run: |
         git clone --depth=1 https://github.com/fightroad/Padavan-KVR.git /opt/rt-n56u
+        git config --global --add safe.directory /opt/rt-n56u
 
-    - name: Hijack Toolchain (路径修复版)
+    - name: Hijack Toolchain
       run: |
         cd /opt/rt-n56u/toolchain-mipsel
-        rm -rf toolchain-3.4.x *.tar.xz
         wget -O toolchain.tar.xz https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1/mipsel-linux-uclibc.tar.xz
         tar -xf toolchain.tar.xz
-        
-        # 自动纠正文件夹名称
+        rm -f toolchain.tar.xz
+        # 路径自动修正
         EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "mipsel*" | head -n 1)
         if [ "$EXTRACTED_DIR" != "./toolchain-3.4.x" ]; then
             mv "$EXTRACTED_DIR" toolchain-3.4.x
         fi
         chmod -R 755 toolchain-3.4.x
 
-    - name: Modify Makefiles (屏蔽烂插件)
-      run: |
-        cd /opt/rt-n56u/trunk/user
-        sed -i 's/^dir_y += shadowsocks/# dir_y += shadowsocks/g' Makefile
-        sed -i 's/^dir_y += v2ray/# dir_y += v2ray/g' Makefile
-        sed -i 's/^dir_y += trojan/# dir_y += trojan/g' Makefile
-        sed -i 's/^dir_y += mentohust/# dir_y += mentohust/g' Makefile
-        sed -i 's/^dir_y += njit/# dir_y += njit/g' Makefile
-        
-        cd ..
-        sed -i 's/sudo //g' build_firmware_modify
-        sed -i 's/sudo //g' tools/Makefile
-        sed -i 's/sudo //g' Makefile
-
-    - name: Prepare Config
+    - name: Configure Pure Version
       env:
         TNAME: K2P
       run: |
         cd /opt/rt-n56u/trunk
         cp -f configs/templates/$TNAME.config .config
         
+        # === 纯净版配置 (全部设为 n) ===
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n/g' .config
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n/g' .config
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_V2RAY=y/CONFIG_FIRMWARE_INCLUDE_V2RAY=n/g' .config
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_TROJAN=y/CONFIG_FIRMWARE_INCLUDE_TROJAN=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=y/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=n/g' .config
+        
+        # 删除下载工具和组网工具
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' .config 
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ZEROTIER/d' .config
         
+        # 显式关闭所有插件
+        echo "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_FRPC=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_ALIDDNS=n" >> .config
+        
+        # 格式修复
         sed -i 's/\r//' .config
-
-    - name: Compile in Docker (Turbo Mode)
-      uses: addnab/docker-run-action@v3
-      with:
-        image: ubuntu:20.04
-        options: -v /opt/rt-n56u:/opt/rt-n56u -w /opt/rt-n56u/trunk
-        run: |
-          sed -i 's/archive.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
-          apt-get update
-          
-          apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
-          cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
-          pkg-config zlib1g-dev libgmp-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev \
-          libssl-dev libelf-dev kmod vim-common bc python3-docutils
-          
-          mkdir -p /usr/include/openssl
-          ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/opensslconf.h || true
-          
-          find . -name "configure.ac" -exec touch {} +
-          find . -name "Makefile.am" -exec touch {} +
-          
-          echo ">>> STARTING TURBO BUILD <<<"
-          ./clear_tree
-          
-          # === 关键修改 ===
-          # 1. yes "" | ... -> 自动回答所有 y/n 问题为回车
-          # 2. 修改脚本里的核心数，强制多线程 (通常 build_firmware_modify 内部有逻辑，但也可能单线程)
-          # 我们这里使用 pipe yes 来防止卡死
-          yes "" | ./build_firmware_modify K2P 0
-          
-          if ls images/*.trx 1> /dev/null 2>&1; then
-             echo "✅ Build SUCCESS!"
-             ls -lh images/*.trx
-          else
-             echo "❌ Build FAILED!"
-             exit 1
-          fi
-
-    - name: Upload packages
-      uses: actions/upload-artifact@master
-      if: success()
-      with:
-        name: Padavan-K2P-KVR-Turbo
-        path: /opt/rt-n56u/trunk/images
+        
+        # 屏蔽烂插件源码 (防止 Makefile 报错)
+        sed -i 's/^dir_y += shadowsocks/# dir_y += shadowsocks/g' user/Makefile
+        sed -i 's/^dir_y += v
