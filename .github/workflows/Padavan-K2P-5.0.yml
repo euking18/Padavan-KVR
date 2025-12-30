@@ -1,5 +1,6 @@
-# KVR 最终修复版: 去除脚本中的 sudo 权限陷阱
-name: Padavan-K2P-KVR-Fix-Sudo
+# KVR 时间机器版: Ubuntu 18.04 + GCC 7
+# 这是编译 2020 年以前老代码的唯一标准答案
+name: Padavan-K2P-KVR-18.04
 
 on: 
   workflow_dispatch:
@@ -7,26 +8,30 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 使用 18.04 容器，还原 4 年前的编译环境
     container: 
-      image: ubuntu:20.04
+      image: ubuntu:18.04
 
     steps:
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        # 1. 换源防止网络超时
+        # === 关键步骤：修复 Ubuntu 18.04 源 (因为官方已停止支持) ===
+        echo "Fixing apt sources for EOL Ubuntu 18.04..."
+        cp /etc/apt/sources.list /etc/apt/sources.list.bak
         sed -i 's/archive.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
+        sed -i 's/security.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
         
-        # 2. 安装基础包
+        # 安装基础工具
         apt-get update
         apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
         cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
         pkg-config zlib1g-dev libgmp3-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev \
         libssl-dev libelf-dev kmod vim-common
         
-        # 3. 安装 sudo (为了欺骗某些检查)，但我们在后面会把脚本里的 sudo 删掉
-        apt-get -y install sudo
+        # 验证 GCC 版本 (应该是 7.x)
+        gcc --version
 
     - name: Clone source code
       run: |
@@ -36,31 +41,26 @@ jobs:
     - name: Hijack Toolchain (嫁接工具链)
       run: |
         cd /opt/rt-n56u/toolchain-mipsel
-        # 下载 hanwckf 的工具链
+        # 下载适配的工具链
         wget -q https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1/mipsel-linux-uclibc.tar.xz
         tar -xvf mipsel-linux-uclibc.tar.xz
         rm -f mipsel-linux-uclibc.tar.xz
         
-        # 关键检查：确保路径存在
+        # 验证目录结构
         if [ -d "toolchain-3.4.x" ]; then
-          echo "Toolchain installed successfully."
+          echo "Toolchain OK"
         else
-          echo "Toolchain extraction failed!"
+          echo "Toolchain failed!"
           exit 1
         fi
 
-    - name: Modify Scripts (关键手术：删除 sudo)
+    - name: Modify Scripts (去除 sudo)
       run: |
         cd /opt/rt-n56u/trunk
-        
-        # === 核心修复 ===
-        # fightroad 的脚本里全是 "sudo ./build_firmware"，在 docker 里这会导致报错
-        # 我们用 sed 命令把所有的 "sudo" 替换为空字符串
+        # 删除脚本中所有的 sudo，因为容器内已经是 root
         sed -i 's/sudo //g' build_firmware_modify
         sed -i 's/sudo //g' tools/Makefile
         sed -i 's/sudo //g' Makefile
-        
-        # 赋予脚本执行权限
         chmod +x build_firmware_modify
         chmod +x clear_tree
 
@@ -78,15 +78,14 @@ jobs:
         cp -f configs/templates/$TNAME.config .config
 
         ################################################################
-        #  极简配置 (为了先跑通，暂时关闭所有插件)
+        #  配置区
         ################################################################
         
+        # 关闭插件
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=y/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=n/g' .config
-        
-        # 删除所有不需要的模块
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' .config 
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ZEROTIER/d' .config
@@ -97,24 +96,31 @@ jobs:
         # 修复换行符
         sed -i 's/\r//' .config
         
-        # 修复 SSL 头文件
-        mkdir -p /usr/include/openssl
-        ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/opensslconf.h || true
-
-        # 清理
+        # === 18.04 专用修复 ===
+        # 18.04 的 automake 版本较旧，有时候会导致 regenerate 错误，手动 touch 一下文件时间
+        find . -name "configure.ac" -exec touch {} +
+        find . -name "Makefile.am" -exec touch {} +
+        
         ./clear_tree
         
-        # === 编译开始 ===
-        echo "Running build script..."
-        # 这里直接运行，不加 sudo，因为我们在上一步已经把脚本里的 sudo 删干净了
+        echo "Starting build..."
+        # 这里的 0 代表不开启单线程调试，如果失败可以尝试改成 1 看日志
         ./build_firmware_modify $TNAME 0
         
-        # 检查结果
         if [ -f images/*.trx ]; then
             echo "Build Success!"
         else
-            echo "Build Failed! Check the logs above."
+            echo "Build Failed!"
+            # 如果失败，列出最后生成的文件，帮助判断断在哪里
+            ls -R images/
             exit 1
         fi
         
-        mv -f images/*.
+        mv -f images/*.trx /opt/images/
+
+    - name: Upload packages
+      uses: actions/upload-artifact@master
+      if: always()
+      with:
+        name: Padavan-K2P-KVR-1804
+        path: /opt/images
