@@ -1,4 +1,4 @@
-name: Padavan-K2P-KVR
+name: Padavan-K2P-KVR-LastResort
 
 on: 
   workflow_dispatch:
@@ -6,105 +6,115 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    container: 
-      image: ubuntu:20.04
 
     steps:
-    - name: Init Environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-        TZ: Asia/Shanghai
-      run: |
-        sed -i 's/archive.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
-        apt-get update
-        apt-get install -y tzdata
-        ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
-        dpkg-reconfigure --frontend noninteractive tzdata
-        apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
-        cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
-        pkg-config zlib1g-dev libgmp-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev \
-        libssl-dev libelf-dev kmod vim-common bc python3-docutils
-        mkdir -p /usr/include/openssl
-        ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/opensslconf.h || true
-
     - name: Clone Source
       run: |
         git clone --depth=1 https://github.com/fightroad/Padavan-KVR.git /opt/rt-n56u
-        git config --global --add safe.directory /opt/rt-n56u
 
-    - name: Setup Toolchain
+    - name: Hijack Toolchain (Host Side)
       run: |
         cd /opt/rt-n56u/toolchain-mipsel
+        # Download hanwckf toolchain
         wget -O toolchain.tar.xz https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1/mipsel-linux-uclibc.tar.xz
         tar -xf toolchain.tar.xz
         rm -f toolchain.tar.xz
+        
+        # Fix toolchain path
         EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "mipsel*" | head -n 1)
         if [ "$EXTRACTED_DIR" != "./toolchain-3.4.x" ]; then
             mv "$EXTRACTED_DIR" toolchain-3.4.x
         fi
+        ln -sf toolchain-3.4.x toolchain
         chmod -R 755 toolchain-3.4.x
 
-    - name: Configure and Build
-      shell: bash
+    - name: Prepare Config
       env:
         TNAME: K2P
       run: |
         cd /opt/rt-n56u/trunk
-        
-        # 1. 配置基础设置
-        if [ ! -f configs/templates/$TNAME.config ] ; then
-            echo "Error: Config not found!"
-            exit 1
-        fi
         cp -f configs/templates/$TNAME.config .config
         
-        # 2. 纯净版配置 (删除不需要的功能)
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=y/d' .config
+        # Pure version config (Disable unnecessary features)
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n/g' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=y/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=n/g' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' .config 
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ZEROTIER/d' .config
         
-        # 显式关闭插件
+        # Explicitly disable all plugins
         echo "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_FRPC=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_ALIDDNS=n" >> .config
         
-        # 修复格式
+        # Fix line endings
         sed -i 's/\r//' .config
         
-        # 3. 屏蔽烂插件源码 (防止 Makefile 报错)
+        # Comment out broken plugins in user/Makefile to prevent build errors
         sed -i '/^dir_y += shadowsocks/d' user/Makefile
         sed -i '/^dir_y += v2ray/d' user/Makefile
         sed -i '/^dir_y += trojan/d' user/Makefile
         
-        # 4. === 核心修复点：文件路径 ===
-        # 之前写成了 ../build_firmware_modify (上一级)，报错说找不到
-        # 现在改为 ./build_firmware_modify (当前目录)
+        # Remove sudo from scripts
+        sed -i 's/sudo //g' build_firmware_modify
+        sed -i 's/sudo //g' tools/Makefile
+        sed -i 's/sudo //g' Makefile
         
-        # 去除 sudo
-        sed -i 's/sudo //g' ./build_firmware_modify
-        sed -i 's/sudo //g' ./tools/Makefile
-        sed -i 's/sudo //g' ./Makefile
-        
-        # 赋予执行权限 (双保险)
-        chmod +x ./build_firmware_modify
-        chmod +x ./clear_tree
-        
-        # 5. 开始编译
-        ./clear_tree
-        yes "" | ./build_firmware_modify K2P 0
-        
-        # 移动固件
-        mv -f images/*.trx /opt/images/
+        # Make scripts executable
+        chmod +x build_firmware_modify clear_tree
+
+    - name: Compile in Legacy 16.04 Container
+      uses: addnab/docker-run-action@v3
+      with:
+        # Use Ubuntu 16.04 for Linux 3.4 kernel compatibility
+        image: ubuntu:16.04
+        options: -v /opt/rt-n56u:/opt/rt-n56u -w /opt/rt-n56u/trunk
+        run: |
+          # 1. Fix Ubuntu 16.04 EOL sources
+          sed -i 's/archive.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
+          sed -i 's/security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
+          
+          # 2. Install dependencies (including bc, kmod, libssl-dev)
+          apt-get update
+          apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
+          cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
+          pkg-config zlib1g-dev libgmp-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev \
+          libssl-dev libelf-dev kmod vim-common bc python
+          
+          # 3. Force bash as default shell
+          rm /bin/sh && ln -s /bin/bash /bin/sh
+          
+          # 4. Fix OpenSSL path
+          mkdir -p /usr/include/openssl
+          ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/opensslconf.h || true
+          
+          # 5. Fix timestamps
+          find . -name "configure.ac" -exec touch {} +
+          find . -name "Makefile.am" -exec touch {} +
+          
+          # 6. Start compilation
+          echo ">>> STARTING BUILD IN 16.04 <<<"
+          ./clear_tree
+          
+          # Use yes to prevent interactive prompts
+          yes "" | ./build_firmware_modify K2P 0
+          
+          # 7. Check results
+          if ls images/*.trx 1> /dev/null 2>&1; then
+             echo "✅ Build SUCCESS!"
+             ls -lh images/*.trx
+          else
+             echo "❌ Build FAILED!"
+             exit 1
+          fi
 
     - name: Upload Firmware
       uses: actions/upload-artifact@master
-      if: always()
+      if: success()
       with:
-        name: Padavan-K2P-KVR-Success
-        path: /opt/images
+        name: Padavan-K2P-KVR-Relic
+        path: /opt/rt-n56u/trunk/images
