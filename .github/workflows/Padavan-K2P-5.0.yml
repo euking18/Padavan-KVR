@@ -1,44 +1,59 @@
-# KVR 终极版: Fightroad源码 + 22.04环境 + GCC9修复
-name: Padavan-K2P-KVR-Build
+# KVR 终极救砖版: Docker 容器方案
+# 解决所有环境不兼容、OpenSSL报错、Exit Code 2 问题
+name: Padavan-K2P-KVR-Docker-Final
 
 on: 
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04 # 升级到 22.04，秒开，不用排队
+    # 使用最新的宿主机，避免 "Waiting for runner" 排队
+    runs-on: ubuntu-latest
+    
+    # 核心黑科技：在宿主机里运行一个 Ubuntu 20.04 的容器
+    # 这能提供完美兼容 4 年前代码的旧环境 (OpenSSL 1.1 + GCC 9)
+    container: 
+      image: ubuntu:20.04
 
     steps:
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo apt-get update
-        # 1. 安装编译 Padavan 所需的依赖 (注意 python3-docutils 是 22.04 专用)
-        sudo apt-get -y install unzip libtool-bin curl cmake gperf gawk flex bison nano xxd fakeroot \
-        cpio git python3-docutils gettext automake autopoint texinfo build-essential help2man \
-        pkg-config zlib1g-dev libgmp3-dev libmpc-dev libmpfr-dev libncurses-dev libltdl-dev wget \
-        libssl-dev libelf-dev gcc-9 g++-9
+        # 1. 替换源以加快速度 (可选)
+        sed -i 's/archive.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
         
-        # 2. 核心修复：强制将系统编译器切换回 GCC-9 (否则 fightroad 的老代码会报错)
-        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 100
-        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 100
+        # 2. 安装基础工具
+        apt-get update
+        apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
+        cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
+        pkg-config zlib1g-dev libgmp3-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev \
+        libssl-dev libelf-dev kmod
+        
+        # 补充安装 sudo (防止脚本内部调用 sudo 报错)
+        apt-get -y install sudo
 
-    - name: Clone source code (Fightroad KVR Version)
+    - name: Clone source code (Fightroad KVR)
       run: |
-        # 克隆 fightroad 的 KVR 专版源码
+        # 克隆 fightroad 的 KVR 源码
         git clone --depth=1 https://github.com/fightroad/Padavan-KVR.git /opt/rt-n56u
+        
+        # 标记目录为安全 (Docker特有修正)
+        git config --global --add safe.directory /opt/rt-n56u
 
-    - name: Hijack Toolchain (嫁接工具链)
+    - name: Hijack Toolchain (修复工具链死链接)
       run: |
         cd /opt/rt-n56u/toolchain-mipsel
-        # 3. 核心修复：手动下载 hanwckf 的工具链，救活 fightroad 的死链接
+        # 强行替换为 hanwckf 维护的有效工具链
         echo "Downloading replacement toolchain..."
         wget -q https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1/mipsel-linux-uclibc.tar.xz
         
-        # 解压并清理
+        # 解压
         tar -xvf mipsel-linux-uclibc.tar.xz
         rm -f mipsel-linux-uclibc.tar.xz
+        
+        # 验证
+        ls -l toolchain-3.4.x
 
     - name: Build Firmware
       env:
@@ -47,43 +62,51 @@ jobs:
       run: |
         cd /opt/rt-n56u/trunk
         
-        # 读取配置文件
         if [ ! -f configs/templates/$TNAME.config ] ; then
-            echo "configs/templates/$TNAME.config not found "
+            echo "Error: Config file not found!"
             exit 1
         fi
         cp -f configs/templates/$TNAME.config .config
 
         ################################################################
-        #  KVR 纯净版配置
+        #  配置修改区
         ################################################################
         
-        # 1. 关闭不常用的插件，保持纯净
+        # 关闭多余插件，确保编译成功率
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=y/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=n/g' .config
-        
-        # 2. 删除大型应用
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' .config 
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ZEROTIER/d' .config
         
-        # 3. 关闭科学上网 (Fightroad 原版代码这里的插件可能很旧，建议关闭以防报错)
-        # 如果你确实需要 SS，可以尝试把 n 改为 y，但风险自负
+        # 显式关闭科学插件 (老代码通常在这里出问题，先关闭以保通过)
         echo "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> .config
         
-        # 修复格式并编译
+        # 修复 Windows 换行符
         sed -i 's/\r//' .config
-        sudo ./clear_tree
+        
+        # === 终极修复：SSL 路径兼容 ===
+        # 防止老代码找不到 openssl 头文件
+        mkdir -p /usr/include/openssl
+        # 尝试创建一个通用的软链接，忽略错误
+        ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/opensslconf.h || true
+
+        # 开始编译
+        ./clear_tree
+        
+        # 使用 sudo 运行构建脚本 (为了兼容脚本内部可能存在的 sudo 调用)
         sudo ./build_firmware_modify $TNAME 0
-        sudo mv -f images/*.trx /opt/images/
+        
+        # 移动固件
+        mv -f images/*.trx /opt/images/
 
     - name: Upload packages
       uses: actions/upload-artifact@master
       if: always()
       with:
-        name: Padavan-K2P-KVR
+        name: Padavan-K2P-KVR-Docker
         path: /opt/images
