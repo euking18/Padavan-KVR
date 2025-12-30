@@ -1,17 +1,12 @@
-# KVR 终极救砖版: Docker 容器方案
-# 解决所有环境不兼容、OpenSSL报错、Exit Code 2 问题
-name: Padavan-K2P-KVR-Docker-Final
+# KVR 最终修复版: 去除脚本中的 sudo 权限陷阱
+name: Padavan-K2P-KVR-Fix-Sudo
 
 on: 
   workflow_dispatch:
 
 jobs:
   build:
-    # 使用最新的宿主机，避免 "Waiting for runner" 排队
     runs-on: ubuntu-latest
-    
-    # 核心黑科技：在宿主机里运行一个 Ubuntu 20.04 的容器
-    # 这能提供完美兼容 4 年前代码的旧环境 (OpenSSL 1.1 + GCC 9)
     container: 
       image: ubuntu:20.04
 
@@ -20,40 +15,54 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        # 1. 替换源以加快速度 (可选)
+        # 1. 换源防止网络超时
         sed -i 's/archive.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
         
-        # 2. 安装基础工具
+        # 2. 安装基础包
         apt-get update
         apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
         cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
         pkg-config zlib1g-dev libgmp3-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev \
-        libssl-dev libelf-dev kmod
+        libssl-dev libelf-dev kmod vim-common
         
-        # 补充安装 sudo (防止脚本内部调用 sudo 报错)
+        # 3. 安装 sudo (为了欺骗某些检查)，但我们在后面会把脚本里的 sudo 删掉
         apt-get -y install sudo
 
-    - name: Clone source code (Fightroad KVR)
+    - name: Clone source code
       run: |
-        # 克隆 fightroad 的 KVR 源码
         git clone --depth=1 https://github.com/fightroad/Padavan-KVR.git /opt/rt-n56u
-        
-        # 标记目录为安全 (Docker特有修正)
         git config --global --add safe.directory /opt/rt-n56u
 
-    - name: Hijack Toolchain (修复工具链死链接)
+    - name: Hijack Toolchain (嫁接工具链)
       run: |
         cd /opt/rt-n56u/toolchain-mipsel
-        # 强行替换为 hanwckf 维护的有效工具链
-        echo "Downloading replacement toolchain..."
+        # 下载 hanwckf 的工具链
         wget -q https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1/mipsel-linux-uclibc.tar.xz
-        
-        # 解压
         tar -xvf mipsel-linux-uclibc.tar.xz
         rm -f mipsel-linux-uclibc.tar.xz
         
-        # 验证
-        ls -l toolchain-3.4.x
+        # 关键检查：确保路径存在
+        if [ -d "toolchain-3.4.x" ]; then
+          echo "Toolchain installed successfully."
+        else
+          echo "Toolchain extraction failed!"
+          exit 1
+        fi
+
+    - name: Modify Scripts (关键手术：删除 sudo)
+      run: |
+        cd /opt/rt-n56u/trunk
+        
+        # === 核心修复 ===
+        # fightroad 的脚本里全是 "sudo ./build_firmware"，在 docker 里这会导致报错
+        # 我们用 sed 命令把所有的 "sudo" 替换为空字符串
+        sed -i 's/sudo //g' build_firmware_modify
+        sed -i 's/sudo //g' tools/Makefile
+        sed -i 's/sudo //g' Makefile
+        
+        # 赋予脚本执行权限
+        chmod +x build_firmware_modify
+        chmod +x clear_tree
 
     - name: Build Firmware
       env:
@@ -69,44 +78,43 @@ jobs:
         cp -f configs/templates/$TNAME.config .config
 
         ################################################################
-        #  配置修改区
+        #  极简配置 (为了先跑通，暂时关闭所有插件)
         ################################################################
         
-        # 关闭多余插件，确保编译成功率
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=y/CONFIG_FIRMWARE_INCLUDE_NJIT_CLIENT=n/g' .config
+        
+        # 删除所有不需要的模块
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' .config 
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ZEROTIER/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_V2RAY/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_TROJAN/d' .config
         
-        # 显式关闭科学插件 (老代码通常在这里出问题，先关闭以保通过)
-        echo "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> .config
-        
-        # 修复 Windows 换行符
+        # 修复换行符
         sed -i 's/\r//' .config
         
-        # === 终极修复：SSL 路径兼容 ===
-        # 防止老代码找不到 openssl 头文件
+        # 修复 SSL 头文件
         mkdir -p /usr/include/openssl
-        # 尝试创建一个通用的软链接，忽略错误
         ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/opensslconf.h || true
 
-        # 开始编译
+        # 清理
         ./clear_tree
         
-        # 使用 sudo 运行构建脚本 (为了兼容脚本内部可能存在的 sudo 调用)
-        sudo ./build_firmware_modify $TNAME 0
+        # === 编译开始 ===
+        echo "Running build script..."
+        # 这里直接运行，不加 sudo，因为我们在上一步已经把脚本里的 sudo 删干净了
+        ./build_firmware_modify $TNAME 0
         
-        # 移动固件
-        mv -f images/*.trx /opt/images/
-
-    - name: Upload packages
-      uses: actions/upload-artifact@master
-      if: always()
-      with:
-        name: Padavan-K2P-KVR-Docker
-        path: /opt/images
+        # 检查结果
+        if [ -f images/*.trx ]; then
+            echo "Build Success!"
+        else
+            echo "Build Failed! Check the logs above."
+            exit 1
+        fi
+        
+        mv -f images/*.
