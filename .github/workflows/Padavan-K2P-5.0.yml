@@ -1,4 +1,4 @@
-name: Padavan-K2P-KVR-Turbo
+name: Padavan-K2P-KVR
 
 on: 
   workflow_dispatch:
