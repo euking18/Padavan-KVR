@@ -1,4 +1,4 @@
-name: Padavan-K2P-5.0
+name: Padavan-K2P-KVR-GodMode
 
 on: 
   workflow_dispatch:
@@ -8,38 +8,34 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Clone source code (Host)
+    - name: Clone Source Code
       run: |
         git clone --depth=1 https://github.com/fightroad/Padavan-KVR.git /opt/rt-n56u
-        
-    - name: Hijack Toolchain (Host)
+
+    - name: Hijack Toolchain (手动下载工具链，双保险)
       run: |
         cd /opt/rt-n56u/toolchain-mipsel
         wget -q https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1/mipsel-linux-uclibc.tar.xz
         tar -xvf mipsel-linux-uclibc.tar.xz
         rm -f mipsel-linux-uclibc.tar.xz
-        
-        # === 关键修复：建立双重链接，防止脚本找不到文件夹 ===
-        # 有些脚本找 toolchain-3.4.x，有些找 toolchain，我们两个都给
+        # 建立软链接，防止脚本找不到
         ln -sf toolchain-3.4.x toolchain
         chmod -R 755 toolchain-3.4.x
 
-    - name: Prepare Config & Amputate (Host)
+    - name: Prepare Config
       env:
         TNAME: K2P
       run: |
         cd /opt/rt-n56u/trunk
         cp -f configs/templates/$TNAME.config .config
         
-        # === 1. 物理删除失效插件源码 (截肢手术) ===
-        # 防止 Makefile 进入这些目录报错 (这是 fightroad 编译失败的常见原因)
+        # === 1. 暴力清理插件 (防止报错) ===
+        # 直接删除可能有问题的源码目录
         rm -rf user/shadowsocks
         rm -rf user/v2ray
         rm -rf user/trojan
-        rm -rf user/v2ray_chain
         
-        # === 2. 修改配置文件 ===
-        # 强制关闭所有相关插件
+        # === 2. 配置文件清理 ===
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=y/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=y/CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n/g' .config
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=y/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n/g' .config
@@ -51,59 +47,51 @@ jobs:
         sed -i '/CONFIG_FIRMWARE_INCLUDE_V2RAY/d' .config
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TROJAN/d' .config
         
-        # 修复 sudo
+        # 修复 sudo 问题
         sed -i 's/sudo //g' build_firmware_modify
         sed -i 's/sudo //g' tools/Makefile
         sed -i 's/sudo //g' Makefile
         
-        # 修复换行
+        # 修复换行符
         sed -i 's/\r//' .config
 
-    - name: Compile in Legacy Docker (16.04)
+    - name: Compile in Dedicated Image
       uses: addnab/docker-run-action@v3
       with:
-        image: ubuntu:16.04
+        # === 核心改变：使用大神制作的专用编译镜像 ===
+        # 这个镜像里环境是 100% 齐全的
+        image: ylqjgm/padavan
         options: -v /opt/rt-n56u:/opt/rt-n56u -w /opt/rt-n56u/trunk
         run: |
-          # === 容器内环境配置 ===
+          echo "Processing in specialized environment..."
           
-          # 1. 换源
-          sed -i 's/archive.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
-          sed -i 's/security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
-          
-          # 2. 安装依赖 (补全了 bc, python, kmod 等关键包)
-          apt-get update
-          apt-get -y install curl wget git tar unzip libtool-bin cmake gperf gawk flex bison nano xxd fakeroot \
-          cpio python-docutils gettext automake autopoint texinfo build-essential help2man \
-          pkg-config zlib1g-dev libgmp-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev \
-          libssl-dev libelf-dev kmod vim-common bc python
-          
-          # 3. 修复时间戳
+          # 1. 再次修复 Automake 时间戳 (老代码通病)
           find . -name "configure.ac" -exec touch {} +
           find . -name "Makefile.am" -exec touch {} +
           
-          # 4. 再次确保工具链权限
+          # 2. 确保工具链路径正确 (再次授权)
           chmod +x ../toolchain-mipsel/toolchain-3.4.x/bin/*
           
-          # 5. 清理并编译
-          echo "Starting compilation..."
+          # 3. 清理环境
           ./clear_tree
           
-          # 运行编译 (使用 0 参数，如果还不行，我们只能看命了)
+          # 4. 开始编译 (开启单线程 -j1 调试模式，这样报错会显示得更清楚)
+          echo ">>> STARTING BUILD <<<"
           ./build_firmware_modify K2P 0
           
-          # 6. 结果检查
+          # 5. 结果检查
           if ls images/*.trx 1> /dev/null 2>&1; then
-             echo "✅ Firmware generated successfully!"
-             ls -lh images/*.trx
+             echo "✅ Firmware Success!"
           else
-             echo "❌ Build FAILED! No firmware found."
+             echo "❌ Build FAILED!"
+             # 如果失败，列出最后生成的文件，看看死在哪里
+             ls -R images/ || true
              exit 1
           fi
 
-    - name: Upload packages (Host)
+    - name: Upload packages
       uses: actions/upload-artifact@master
       if: success()
       with:
-        name: Padavan-K2P-KVR-Amputated
+        name: Padavan-K2P-KVR-GodMode
         path: /opt/rt-n56u/trunk/images
